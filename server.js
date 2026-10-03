@@ -6,6 +6,35 @@ const mongoose = require('mongoose');
 dotenv.config();
 
 const app = express();
+let mongoConnectionPromise;
+
+const connectToMongo = async () => {
+    if (mongoose.connection.readyState === 1) return;
+    if (mongoose.connection.readyState === 2 && mongoConnectionPromise) {
+        await mongoConnectionPromise;
+        return;
+    }
+    if (!process.env.MONGO_URI) {
+        throw new Error('MONGO_URI is not configured');
+    }
+
+    mongoConnectionPromise = mongoose.connect(process.env.MONGO_URI).catch((error) => {
+        mongoConnectionPromise = null;
+        throw error;
+    });
+    await mongoConnectionPromise;
+    console.log('✅ MongoDB connected');
+};
+
+const requireMongo = async (req, res, next) => {
+    try {
+        await connectToMongo();
+        next();
+    } catch (error) {
+        console.error('❌ MongoDB connection failed:', error.message);
+        res.status(503).json({ message: 'Database connection unavailable' });
+    }
+};
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -23,14 +52,14 @@ app.use(cors({
     origin: (origin, callback) => {
         // Allow requests with no origin (like mobile apps or curl)
         if (!origin) return callback(null, true);
-        
+
         const normalizedOrigin = origin.replace(/\/$/, "");
-        
+
         // Allow strict matches
         if (allowedOrigins.includes(normalizedOrigin)) {
             return callback(null, true);
         }
-        
+
         // Allow any Vercel deployment/preview URL for this project
         if (normalizedOrigin.includes("niravana-ai-website-builder") && normalizedOrigin.endsWith(".vercel.app")) {
             return callback(null, true);
@@ -46,18 +75,24 @@ app.use(cors({
 }));
 
 // Health check route
-app.get('/', (req, res) => {
-    res.json({ status: 'ok', message: 'NirvanaMax API is running' });
+app.get('/', async (req, res) => {
+    try {
+        await connectToMongo();
+        res.json({ status: 'ok', database: 'connected', message: 'NirvanaAi API is running' });
+    } catch (error) {
+        console.error('❌ MongoDB connection failed:', error.message);
+        res.status(503).json({ status: 'error', database: 'unavailable', message: 'Database connection unavailable' });
+    }
 });
 
 // Routes
 const authRoutes = require('./routes/authRoutes');
 const chatRoutes = require('./routes/chatRoutes');
-const aiRoutes   = require('./routes/aiRoutes');
+const aiRoutes = require('./routes/aiRoutes');
 
-app.use('/api/auth', authRoutes);
-app.use('/api/chat', chatRoutes);
-app.use('/api/ai',   aiRoutes);
+app.use('/api/auth', requireMongo, authRoutes);
+app.use('/api/chat', requireMongo, chatRoutes);
+app.use('/api/ai', aiRoutes);
 
 // Global error handler
 app.use((err, req, res, next) => {
@@ -65,21 +100,16 @@ app.use((err, req, res, next) => {
     res.status(500).json({ message: err.message || 'Internal Server Error' });
 });
 
-// Connect to MongoDB, then start server
-// Use a fallback for PORT and ensure it's a number
-let PORT = process.env.PORT || 5000;
-if (isNaN(PORT)) {
-    console.warn(`⚠️ Invalid PORT environment variable: "${process.env.PORT}". Defaulting to 5000.`);
-    PORT = 5000;
-}
+module.exports = app;
 
-mongoose
-    .connect(process.env.MONGO_URI)
-    .then(() => {
-        console.log('✅ MongoDB connected');
-        app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
-    })
-    .catch((err) => {
-        console.error('❌ MongoDB connection failed:', err.message);
-        process.exit(1);
-    });
+if (require.main === module) {
+    const port = Number.parseInt(process.env.PORT || '5000', 10);
+    connectToMongo()
+        .then(() => {
+            app.listen(port, '0.0.0.0', () => console.log(`🚀 Server running on port ${port}`));
+        })
+        .catch((error) => {
+            console.error('❌ MongoDB connection failed:', error.message);
+            process.exit(1);
+        });
+}
